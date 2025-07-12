@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>B61 Nuclear Detonation Simulation</title>
+        <style>
+            body { display: flex; justify-content: center; align-items: center; margin: 0; height: 100vh; background-color: black; }
+            canvas { border: 1px solid white; }
+        </style>
+    </head>
+    <body>
+        <canvas id="simulation" width="800" height="600"></canvas>
+        <script>
+            // Basic WebGL setup for a simple nuclear explosion simulation using shaders
+            // This simulates a fireball expanding, with glowing effects and simple noise for plasma/mushroom cloud approximation.
+            // Note: This is a highly simplified model, not scientifically accurate. For demonstration purposes only.
+
+            const canvas = document.getElementById('simulation");
+            const gl = canvas.getContext('webgl');
+
+            if (!gl) {
+                console.error('WebGL not supported');
+            }
+
+            // Vertex Shader: Simple pass-through for full-screen quad
+            const vsSource = `
+                attribute vec2 position;
+                void main() {
+                    gl_Position = vec4(position, 0.0, 1.0);
+                }
+            `;
+
+            // Fragment Shader: Raymarching a fireball with noise and color gradient for nuclear detonation effect
+            // Simulates expanding sphere with heat glow, shockwave, and basic mushroom cloud shape.
+            const fsSource = `
+                precision mediump float;
+
+                uniform float time;
+                uniform vec3 resolution;
+
+                // Simple hash function for noise
+                float hash(float n) { return fract(sin(n)*43758.5453); }
+
+                // Perlin noise for cloud/plasma effect
+                float noise(vec3 x) {
+                    vec3 p = floor(x);
+                    vec3 f = fract(x);
+                    f = f * f * (3.0 - 2.0 * f);
+
+                    float n = p.x + p.y*57.0 + 113.0 * p.z;
+
+                    return mix(mix(mix( hash(n+  0.0), hash(n+  1.0),f.x),
+                                   mix( hash(n+ 57.0), hash(n+  58.0),f.x),f.y),
+                               mix(mix( hash(n+113.0), hash(n+114.0),f.x),
+                                   mix( hash(n+170.0), hash(n+171.0),f.x),f.y),f.z);
+                }
+
+                // Signed distance function for sphere (fireball)
+                float sdSphere(vec3 p, float r) {
+                    return length(p) - r;
+                }
+
+                // Simple mushroom cloud deformation
+                float mushroom(vec3 p, float r) {
+                    float cap = sdSphere(p - vec3(0.0, r*1.5, 0.0), r*1.2);
+                    float stem = sdSphere(p, r*0.5);
+                    return min(cap, stem);
+                }
+
+                // Raymarching scene
+                float scene(vec3 p) {
+                    float expansion = 0.5 + sin(time * 0.5)*0.2 + time*0.1; // Expanding radius
+                    float fireball = mushroom(p, expansion);
+                    // Add noise for irregularity
+                    fireball -= noise(p * 5.0 + time) * 0.1;
+                    return fireball;
+                }
+
+                // Ray marching
+                float raymarch(vec3 ro, vec3 rd) {
+                    float t = 0.0;
+                    for(int i=0; i<100; i++) {
+                        vec3 p = ro + t * rd;
+                        float d = scene(p);
+                        if(d < 0.001) return t;
+                        t += d;
+                        if(t > 20.0) break;
+                    }
+                    return -1.0; // No hit
+                }
+
+                // Normal calculation
+                vec3 normal(vec3 p) {
+                    float eps = 0.001;
+                    return normalize(vec3(
+                        scene(p + vec3(eps,0,0)) - scene(p - vec3(eps,0,0)),
+                        scene(p + vec3(0,eps,0)) - scene(p - vec3(0,0,eps)),
+                        scene(p + vec3(0,0,0,eps)) - scene(p - vec3(0,0,eps))
+                    ));
+                }
+
+                void main() {
+                    vec2 uv = (gl_FragCoord.xy / resolution.xy) * 2.0 - 1.0;
+                    uv.x *= resolution.x / resolution.y;
+
+                    vec3 ro = vec3(0.0, 0.0, -3.0); // Camera position
+                    vec3 rd = normalize(vec3(uv, 1.0)); // Ray direction
+
+                    float dist = raymarch(ro, rd);
+
+                    if(dist > 0.0) {
+                        vec3 p = ro + rd * dist;
+                        vec3 n = normal(p);
+                        vec3 light = normalize(vec3(1.0,1.0,-1.0));
+
+                        float diff = max(0.0, dot(n, light));
+                        // Color gradient for nuclear fire: red-orange-yellow-white
+                        float heat = 1.0 - smoothstep(0.0, 2.0, length(p));
+                        vec3 color = mix(vec3(1.0, 0.1, 0.0), vec3(1.0,1.0,0.0), heat);
+                        color = mix(color, vec3(1.0), smoothstep(1.5,2.0, heat));
+
+                        // Add glow
+                        float glow = exp(-dist * 0.1);
+                        color += glow * vec3(1.0, 0.5, 0.2);
+
+                        // Shockwave effect (simple ring)
+                        float shock = smoothstep(0.5, 0.6, sin(length(uv)*10.0 - time*5.0));
+                        color += shock * vec3(0.5,0.5,1.0);
+
+                        gl_FragColor = vec4(color * diff, 1.0);
+                    } else {
+                        // Background
+                        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                    }
+                }
+            `;
+
+            // Compile shader
+            function createShader(type, source) {
+                const shader = gl.createShader(type);
+                gl.shaderSource(shader, source);
+                gl.compileShader(shader);
+                if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                    console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+                    return null;
+                }
+                return shader;
+            }
+
+            const vertexShader = createShader(gl.VERTEX_SHADER, vsSource);
+            const fragmentShader = createShader(gl.FRAGMENT_SHADER, fsSource);
+
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program link error:', gl.getProgramInfoLog(program));
+            }
+
+            gl.useProgram(program);
+
+            // Full screen quad
+            const positionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            const positions = new Float32Array([
+                -1, -1,
+                1, -1,
+                -1, 1,
+                -1, 1,
+                1, 1,
+                1, 1,
+            ]);
+            gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+            const positionLoc = gl.getAttribLocation(program, 'position');
+            gl.enableVertexAttribArray(positionLoc);
+            gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+
+            const resolutionLoc = gl.getUniformLocation(program, 'resolution');
+            gl.uniform3fv(resolutionLoc, [canvas.width, canvas.height, 1.0]);
+
+            const timeLoc = gl.getUniformLocation(program, 'time');
+
+            let startTime = Date.now() / 1000;
+
+            function render() {
+                time = (Date.now() / 1000 - startTime);
+                gl.uniform1f(timeLoc, time);
+
+                gl.clearColor(0.0, 0.0,0.0,1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+                requestAnimationFrame(render);
+            }
+
+            render();
+        </script>
+    </body>
+</html>
